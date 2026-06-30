@@ -107,8 +107,8 @@ FOREX_PAIRS: dict[str, dict] = {
 EMA_FAST         = 20    # utilisé uniquement pour le graphique
 EMA_SLOW         = 50    # utilisé uniquement pour le graphique
 
-ROC_PERIOD       = 10    # Rate of Change sur N bougies
-ROC_THRESHOLD    = 0.3   # % minimum pour qualifier (0.3 % = 30 pips sur EUR/USD)
+ROC_PERIOD       = 3     # Rate of Change sur N bougies
+ROC_THRESHOLD    = 0.1   # % minimum pour qualifier
 
 VOLUME_SURGE_PCT = 10    # Seuil de hausse du volume en % vs bougie précédente
 
