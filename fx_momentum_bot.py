@@ -109,14 +109,8 @@ MACD_SLOW        = 26
 MACD_SIGNAL      = 9
 MACD_CROSS_WINDOW = 3    # crossover détecté si survenu dans les N dernières bougies
 
-EMA_FAST         = 20
-EMA_SLOW         = 50
-
-RSI_PERIOD       = 14
-RSI_MOM_BULL_MIN = 52    # RSI en zone momentum haussier
-RSI_MOM_BULL_MAX = 70
-RSI_MOM_BEAR_MIN = 30
-RSI_MOM_BEAR_MAX = 48
+EMA_FAST         = 20    # utilisé uniquement pour le graphique
+EMA_SLOW         = 50    # utilisé uniquement pour le graphique
 
 ROC_PERIOD       = 10    # Rate of Change sur N bougies
 ROC_THRESHOLD    = 0.3   # % minimum pour qualifier (0.3 % = 30 pips sur EUR/USD)
@@ -204,7 +198,7 @@ def fetch_m5_data(td_symbol: str) -> pd.DataFrame | None:
 
 # ─── Détection du momentum ────────────────────────────────────────────────────
 
-def _strength_stars(n: int, total: int = 6) -> str:
+def _strength_stars(n: int, total: int = 4) -> str:
     color = "🔴" if n == 1 else ("🟢" if n >= total else "🟠")
     return f"{color} {'★' * n}{'☆' * (total - n)}"
 
@@ -213,15 +207,12 @@ def detect_momentum(df: pd.DataFrame) -> dict:
     """
     Logique OR : alerte si au moins 1 condition est vraie dans une direction.
       ① MACD crossover dans les N dernières bougies
-      ② Alignement EMA20/EMA50 (prix du bon côté)
-      ③ RSI en zone momentum (52–70 bull | 30–48 bear)
-      ④ ROC > seuil dans la bonne direction
+      ② ROC > seuil dans la bonne direction
+      ③ Volume spike > moyenne + 10%
+      ④ Range bougie actuelle ≥ 2× moy des 2 précédentes
     Direction = celle qui cumule le plus de signaux.
     """
     df = df.copy()
-    df["EMA_fast"] = compute_ema(df["Close"], EMA_FAST)
-    df["EMA_slow"] = compute_ema(df["Close"], EMA_SLOW)
-    df["RSI"]      = compute_rsi(df["Close"], RSI_PERIOD)
     df["ROC"]      = compute_roc(df["Close"], ROC_PERIOD)
     df["MACD"], df["Signal"], df["Hist"] = compute_macd(df["Close"])
 
@@ -229,40 +220,27 @@ def detect_momentum(df: pd.DataFrame) -> dict:
         "detected":      False,
         "reject_reason": "",
         "price":         round(float(df["Close"].iloc[-1]), 5),
-        "rsi":           round(float(df["RSI"].iloc[-1]), 1) if not pd.isna(df["RSI"].iloc[-1]) else 0,
         "roc":           round(float(df["ROC"].iloc[-1]), 3) if not pd.isna(df["ROC"].iloc[-1]) else 0,
         "macd":          round(float(df["MACD"].iloc[-1]), 6) if not pd.isna(df["MACD"].iloc[-1]) else 0,
     }
 
     last = df.iloc[-1]
-    if pd.isna(last["MACD"]) or pd.isna(last["RSI"]):
+    if pd.isna(last["MACD"]):
         base["reject_reason"] = "indicateurs invalides"
         return base
 
-    price    = float(last["Close"])
-    ema_fast = float(last["EMA_fast"])
-    ema_slow = float(last["EMA_slow"])
-    rsi      = float(last["RSI"])
-    roc      = float(last["ROC"]) if not pd.isna(last["ROC"]) else 0.0
+    roc = float(last["ROC"]) if not pd.isna(last["ROC"]) else 0.0
 
     # ── ① MACD crossover récent ───────────────────────────────────────────
     hist_vals = df.iloc[-(MACD_CROSS_WINDOW + 1):]["Hist"].values
     bull_cross = any(hist_vals[i - 1] < 0 and hist_vals[i] >= 0 for i in range(1, len(hist_vals)))
     bear_cross = any(hist_vals[i - 1] > 0 and hist_vals[i] <= 0 for i in range(1, len(hist_vals)))
 
-    # ── ② Alignement EMA ──────────────────────────────────────────────────
-    ema_aligned_bull = ema_fast > ema_slow and price > ema_fast
-    ema_aligned_bear = ema_fast < ema_slow and price < ema_fast
-
-    # ── ③ RSI momentum ────────────────────────────────────────────────────
-    rsi_mom_bull = RSI_MOM_BULL_MIN <= rsi <= RSI_MOM_BULL_MAX
-    rsi_mom_bear = RSI_MOM_BEAR_MIN <= rsi <= RSI_MOM_BEAR_MAX
-
-    # ── ④ ROC ─────────────────────────────────────────────────────────────
+    # ── ② ROC ─────────────────────────────────────────────────────────────
     roc_bull = roc >  ROC_THRESHOLD
     roc_bear = roc < -ROC_THRESHOLD
 
-    # ── ⑤ Volume spike ────────────────────────────────────────────────────
+    # ── ③ Volume spike ────────────────────────────────────────────────────
     vol_series   = df["Volume"].replace(0, np.nan).dropna()
     vol_surge    = False
     vol_pct      = 0.0
@@ -273,7 +251,7 @@ def detect_momentum(df: pd.DataFrame) -> dict:
             vol_pct   = ((cur_vol - avg_vol) / avg_vol) * 100
             vol_surge = vol_pct >= VOLUME_SURGE_PCT
 
-    # ── ⑥ Grosse bougie (range actuel ≥ 2× moy des 2 précédentes) ──────────
+    # ── ④ Grosse bougie (range actuel ≥ 2× moy des 2 précédentes) ────────
     cur_range  = float(last["High"] - last["Low"])
     avg_range2 = (
         float(df.iloc[-2]["High"] - df.iloc[-2]["Low"]) +
@@ -285,14 +263,10 @@ def detect_momentum(df: pd.DataFrame) -> dict:
     # ── Construire les listes de signaux (OR) ─────────────────────────────
     bull_signals, bear_signals = [], []
 
-    if bull_cross:       bull_signals.append("MACD crossover haussier")
-    if bear_cross:       bear_signals.append("MACD crossover baissier")
-    if ema_aligned_bull: bull_signals.append(f"EMA{EMA_FAST} > EMA{EMA_SLOW}, prix > EMA{EMA_FAST}")
-    if ema_aligned_bear: bear_signals.append(f"EMA{EMA_FAST} < EMA{EMA_SLOW}, prix < EMA{EMA_FAST}")
-    if rsi_mom_bull:     bull_signals.append(f"RSI {rsi:.1f} (zone momentum)")
-    if rsi_mom_bear:     bear_signals.append(f"RSI {rsi:.1f} (zone momentum)")
-    if roc_bull:         bull_signals.append(f"ROC +{roc:.2f}%")
-    if roc_bear:         bear_signals.append(f"ROC {roc:.2f}%")
+    if bull_cross: bull_signals.append("MACD crossover haussier")
+    if bear_cross: bear_signals.append("MACD crossover baissier")
+    if roc_bull:   bull_signals.append(f"ROC +{roc:.2f}%")
+    if roc_bear:   bear_signals.append(f"ROC {roc:.2f}%")
     if vol_surge:
         label = f"Volume +{vol_pct:.0f}% vs moy {VOLUME_LOOKBACK} bougies"
         if roc >= 0: bull_signals.append(label)
@@ -484,11 +458,9 @@ async def scan_all(bot: Bot) -> None:
     log.info("─" * 60)
     log.info("CONDITIONS DE DÉCLENCHEMENT (logique OR) :")
     log.info(f"  ① MACD crossover dans les {MACD_CROSS_WINDOW} dernières bougies")
-    log.info(f"  ② EMA{EMA_FAST} / EMA{EMA_SLOW} alignées + prix du bon côté")
-    log.info(f"  ③ RSI en zone momentum ({RSI_MOM_BULL_MIN}–{RSI_MOM_BULL_MAX} bull | {RSI_MOM_BEAR_MIN}–{RSI_MOM_BEAR_MAX} bear)")
-    log.info(f"  ④ ROC({ROC_PERIOD}) > {ROC_THRESHOLD}% dans la direction")
-    log.info(f"  ⑤ Volume > moyenne {VOLUME_LOOKBACK} bougies + {VOLUME_SURGE_PCT}%")
-    log.info(f"  ⑥ Range bougie actuelle ≥ 2× moy des 2 bougies précédentes")
+    log.info(f"  ② ROC({ROC_PERIOD}) > {ROC_THRESHOLD}% dans la direction")
+    log.info(f"  ③ Volume > moyenne {VOLUME_LOOKBACK} bougies + {VOLUME_SURGE_PCT}%")
+    log.info(f"  ④ Range bougie actuelle ≥ 2× moy des 2 bougies précédentes")
     log.info(f"  → 1 seule condition suffit — direction = celle avec le plus de signaux")
     log.info(f"  [COOLDOWN] {COOLDOWN_HOURS}h par paire/direction")
     log.info("=" * 60)
