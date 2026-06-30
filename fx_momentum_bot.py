@@ -197,7 +197,7 @@ def fetch_m5_data(yf_ticker: str) -> pd.DataFrame | None:
 
 # ─── Détection du momentum ────────────────────────────────────────────────────
 
-def _strength_stars(n: int, total: int = 5) -> str:
+def _strength_stars(n: int, total: int = 6) -> str:
     color = "🔴" if n == 1 else ("🟢" if n >= total else "🟠")
     return f"{color} {'★' * n}{'☆' * (total - n)}"
 
@@ -266,6 +266,15 @@ def detect_momentum(df: pd.DataFrame) -> dict:
             vol_pct   = ((cur_vol - avg_vol) / avg_vol) * 100
             vol_surge = vol_pct >= VOLUME_SURGE_PCT
 
+    # ── ⑥ Grosse bougie (range actuel ≥ 2× moy des 2 précédentes) ──────────
+    cur_range  = float(last["High"] - last["Low"])
+    avg_range2 = (
+        float(df.iloc[-2]["High"] - df.iloc[-2]["Low"]) +
+        float(df.iloc[-3]["High"] - df.iloc[-3]["Low"])
+    ) / 2
+    big_candle       = avg_range2 > 0 and cur_range >= 2 * avg_range2
+    big_candle_ratio = round(cur_range / avg_range2, 2) if avg_range2 > 0 else 0.0
+
     # ── Construire les listes de signaux (OR) ─────────────────────────────
     bull_signals, bear_signals = [], []
 
@@ -281,6 +290,11 @@ def detect_momentum(df: pd.DataFrame) -> dict:
         label = f"Volume +{vol_pct:.0f}% vs moy {VOLUME_LOOKBACK} bougies"
         if roc >= 0: bull_signals.append(label)
         else:        bear_signals.append(label)
+    if big_candle:
+        label = f"Grosse bougie ×{big_candle_ratio} vs moy 2 précédentes"
+        close_vs_open = float(last["Close"]) - float(last["Open"])
+        if close_vs_open >= 0: bull_signals.append(label)
+        else:                  bear_signals.append(label)
 
     if not bull_signals and not bear_signals:
         base["reject_reason"] = "aucune condition déclenchée"
@@ -467,6 +481,7 @@ async def scan_all(bot: Bot) -> None:
     log.info(f"  ③ RSI en zone momentum ({RSI_MOM_BULL_MIN}–{RSI_MOM_BULL_MAX} bull | {RSI_MOM_BEAR_MIN}–{RSI_MOM_BEAR_MAX} bear)")
     log.info(f"  ④ ROC({ROC_PERIOD}) > {ROC_THRESHOLD}% dans la direction")
     log.info(f"  ⑤ Volume > moyenne {VOLUME_LOOKBACK} bougies + {VOLUME_SURGE_PCT}%")
+    log.info(f"  ⑥ Range bougie actuelle ≥ 2× moy des 2 bougies précédentes")
     log.info(f"  → 1 seule condition suffit — direction = celle avec le plus de signaux")
     log.info(f"  [COOLDOWN] {COOLDOWN_HOURS}h par paire/direction")
     log.info("=" * 60)
