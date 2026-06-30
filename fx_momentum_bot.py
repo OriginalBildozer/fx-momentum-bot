@@ -174,17 +174,17 @@ _YF_SESSION.headers.update({
 
 # ─── Récupération des données ─────────────────────────────────────────────────
 
-def fetch_h1_data(yf_ticker: str) -> pd.DataFrame | None:
+def fetch_m5_data(yf_ticker: str) -> pd.DataFrame | None:
     try:
         df = yf.download(
             yf_ticker,
-            period="15d",
-            interval="1h",
+            period="5d",        # yfinance : max 60d pour M5, 5d suffit (~1440 bougies)
+            interval="5m",
             progress=False,
             auto_adjust=True,
             session=_YF_SESSION,
         )
-        if df.empty or len(df) < 60:
+        if df.empty or len(df) < 100:
             log.warning(f"Données insuffisantes pour {yf_ticker} ({len(df)} bougies)")
             return None
         if isinstance(df.columns, pd.MultiIndex):
@@ -307,7 +307,7 @@ def generate_chart(df: pd.DataFrame, pair: str, direction: str, macd_col: pd.Ser
     from datetime import timezone
 
     now      = datetime.now(timezone.utc)
-    start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=2)
+    start_dt = now - timedelta(hours=6)   # M5 : fenêtre de 6h = 72 bougies
     if df.index.tzinfo is None:
         start_dt = start_dt.replace(tzinfo=None)
 
@@ -316,7 +316,7 @@ def generate_chart(df: pd.DataFrame, pair: str, direction: str, macd_col: pd.Ser
 
     chart_df   = df[df.index >= start_dt].copy()
     if chart_df.empty:
-        chart_df = df.tail(48).copy()
+        chart_df = df.tail(72).copy()
 
     ema20  = ema20_full[chart_df.index]
     ema50  = ema50_full[chart_df.index]
@@ -359,7 +359,7 @@ def generate_chart(df: pd.DataFrame, pair: str, direction: str, macd_col: pd.Ser
         type="candle",
         style=style,
         addplot=add_plots,
-        title=f"\n{pair}  ·  H1  ·  Momentum {label_dir}",
+        title=f"\n{pair}  ·  M5  ·  Momentum {label_dir}",
         figsize=(14, 8),
         returnfig=True,
         tight_layout=True,
@@ -476,7 +476,7 @@ async def scan_all(bot: Bot) -> None:
 
     for pair, info in FOREX_PAIRS.items():
         try:
-            df = fetch_h1_data(info["yf"])
+            df = fetch_m5_data(info["yf"])
             if df is None:
                 log.info(f"  {pair:<12} | ⚠️  données indisponibles")
                 continue
