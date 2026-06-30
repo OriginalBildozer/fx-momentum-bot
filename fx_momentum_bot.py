@@ -194,19 +194,19 @@ def fetch_h1_data(yf_ticker: str) -> pd.DataFrame | None:
 
 # ─── Détection du momentum ────────────────────────────────────────────────────
 
-def _strength_stars(n: int, total: int = 3) -> str:
+def _strength_stars(n: int, total: int = 4) -> str:
     color = "🔴" if n == 1 else ("🟢" if n >= total else "🟠")
     return f"{color} {'★' * n}{'☆' * (total - n)}"
 
 
 def detect_momentum(df: pd.DataFrame) -> dict:
     """
-    Momentum confirmé si :
-      ① MACD crossover dans les N dernières bougies  (condition obligatoire)
-      + au moins 1 parmi :
+    Logique OR : alerte si au moins 1 condition est vraie dans une direction.
+      ① MACD crossover dans les N dernières bougies
       ② Alignement EMA20/EMA50 (prix du bon côté)
       ③ RSI en zone momentum (52–70 bull | 30–48 bear)
       ④ ROC > seuil dans la bonne direction
+    Direction = celle qui cumule le plus de signaux.
     """
     df = df.copy()
     df["EMA_fast"] = compute_ema(df["Close"], EMA_FAST)
@@ -229,61 +229,56 @@ def detect_momentum(df: pd.DataFrame) -> dict:
         base["reject_reason"] = "indicateurs invalides"
         return base
 
-    # ── ① MACD crossover récent ───────────────────────────────────────────
-    window = df.iloc[-(MACD_CROSS_WINDOW + 1):]
-    hist_vals = window["Hist"].values
-
-    bull_cross = any(hist_vals[i - 1] < 0 and hist_vals[i] >= 0 for i in range(1, len(hist_vals)))
-    bear_cross = any(hist_vals[i - 1] > 0 and hist_vals[i] <= 0 for i in range(1, len(hist_vals)))
-
-    if not bull_cross and not bear_cross:
-        base["reject_reason"] = "pas de MACD crossover récent"
-        return base
-
-    direction = "bullish" if bull_cross else "bearish"
-
-    # ── ② Alignement EMA ──────────────────────────────────────────────────
     price    = float(last["Close"])
     ema_fast = float(last["EMA_fast"])
     ema_slow = float(last["EMA_slow"])
+    rsi      = float(last["RSI"])
+    roc      = float(last["ROC"]) if not pd.isna(last["ROC"]) else 0.0
 
+    # ── ① MACD crossover récent ───────────────────────────────────────────
+    hist_vals = df.iloc[-(MACD_CROSS_WINDOW + 1):]["Hist"].values
+    bull_cross = any(hist_vals[i - 1] < 0 and hist_vals[i] >= 0 for i in range(1, len(hist_vals)))
+    bear_cross = any(hist_vals[i - 1] > 0 and hist_vals[i] <= 0 for i in range(1, len(hist_vals)))
+
+    # ── ② Alignement EMA ──────────────────────────────────────────────────
     ema_aligned_bull = ema_fast > ema_slow and price > ema_fast
     ema_aligned_bear = ema_fast < ema_slow and price < ema_fast
 
     # ── ③ RSI momentum ────────────────────────────────────────────────────
-    rsi = float(last["RSI"])
     rsi_mom_bull = RSI_MOM_BULL_MIN <= rsi <= RSI_MOM_BULL_MAX
     rsi_mom_bear = RSI_MOM_BEAR_MIN <= rsi <= RSI_MOM_BEAR_MAX
 
     # ── ④ ROC ─────────────────────────────────────────────────────────────
-    roc = float(last["ROC"]) if not pd.isna(last["ROC"]) else 0.0
     roc_bull = roc >  ROC_THRESHOLD
     roc_bear = roc < -ROC_THRESHOLD
 
-    # ── Construire les signaux confirmant la direction ────────────────────
-    signals = []
-    if direction == "bullish":
-        signals.append(f"MACD crossover haussier")
-        if ema_aligned_bull: signals.append(f"EMA{EMA_FAST} > EMA{EMA_SLOW}, prix > EMA{EMA_FAST}")
-        if rsi_mom_bull:     signals.append(f"RSI {rsi:.1f} (zone momentum)")
-        if roc_bull:         signals.append(f"ROC +{roc:.2f}%")
-    else:
-        signals.append(f"MACD crossover baissier")
-        if ema_aligned_bear: signals.append(f"EMA{EMA_FAST} < EMA{EMA_SLOW}, prix < EMA{EMA_FAST}")
-        if rsi_mom_bear:     signals.append(f"RSI {rsi:.1f} (zone momentum)")
-        if roc_bear:         signals.append(f"ROC {roc:.2f}%")
+    # ── Construire les listes de signaux (OR) ─────────────────────────────
+    bull_signals, bear_signals = [], []
 
-    # Au moins 1 signal de confirmation en plus du MACD
-    if len(signals) < 2:
-        base["reject_reason"] = "MACD seul, pas de confirmation"
+    if bull_cross:       bull_signals.append("MACD crossover haussier")
+    if bear_cross:       bear_signals.append("MACD crossover baissier")
+    if ema_aligned_bull: bull_signals.append(f"EMA{EMA_FAST} > EMA{EMA_SLOW}, prix > EMA{EMA_FAST}")
+    if ema_aligned_bear: bear_signals.append(f"EMA{EMA_FAST} < EMA{EMA_SLOW}, prix < EMA{EMA_FAST}")
+    if rsi_mom_bull:     bull_signals.append(f"RSI {rsi:.1f} (zone momentum)")
+    if rsi_mom_bear:     bear_signals.append(f"RSI {rsi:.1f} (zone momentum)")
+    if roc_bull:         bull_signals.append(f"ROC +{roc:.2f}%")
+    if roc_bear:         bear_signals.append(f"ROC {roc:.2f}%")
+
+    if not bull_signals and not bear_signals:
+        base["reject_reason"] = "aucune condition déclenchée"
         return base
+
+    if len(bull_signals) >= len(bear_signals):
+        direction, signals = "bullish", bull_signals
+    else:
+        direction, signals = "bearish", bear_signals
 
     base.update({
         "detected":     True,
         "direction":    direction,
         "signals":      signals,
         "strength":     len(signals),
-        "strength_bar": _strength_stars(len(signals) - 1),  # -1 car MACD est obligatoire
+        "strength_bar": _strength_stars(len(signals)),
     })
     return base
 
@@ -448,12 +443,12 @@ async def scan_all(bot: Bot) -> None:
     log.info(f"[FXMomentumBot] Scan — {_now_paris().strftime('%Y-%m-%d %H:%M:%S')} (Paris)")
     log.info(f"Paires surveillées : {len(FOREX_PAIRS)}")
     log.info("─" * 60)
-    log.info("CONDITIONS DE DÉCLENCHEMENT :")
-    log.info(f"  ① MACD crossover dans les {MACD_CROSS_WINDOW} dernières bougies  [obligatoire]")
-    log.info(f"  ② EMA{EMA_FAST} / EMA{EMA_SLOW} alignées dans la direction")
+    log.info("CONDITIONS DE DÉCLENCHEMENT (logique OR) :")
+    log.info(f"  ① MACD crossover dans les {MACD_CROSS_WINDOW} dernières bougies")
+    log.info(f"  ② EMA{EMA_FAST} / EMA{EMA_SLOW} alignées + prix du bon côté")
     log.info(f"  ③ RSI en zone momentum ({RSI_MOM_BULL_MIN}–{RSI_MOM_BULL_MAX} bull | {RSI_MOM_BEAR_MIN}–{RSI_MOM_BEAR_MAX} bear)")
     log.info(f"  ④ ROC({ROC_PERIOD}) > {ROC_THRESHOLD}% dans la direction")
-    log.info(f"  → Minimum : ① + 1 confirmation parmi ②③④")
+    log.info(f"  → 1 seule condition suffit — direction = celle avec le plus de signaux")
     log.info(f"  [COOLDOWN] {COOLDOWN_HOURS}h par paire/direction")
     log.info("=" * 60)
 
