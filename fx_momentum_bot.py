@@ -121,6 +121,9 @@ RSI_MOM_BEAR_MAX = 48
 ROC_PERIOD       = 10    # Rate of Change sur N bougies
 ROC_THRESHOLD    = 0.3   # % minimum pour qualifier (0.3 % = 30 pips sur EUR/USD)
 
+VOLUME_LOOKBACK  = 20    # Nombre de bougies pour la moyenne de volume de référence
+VOLUME_SURGE_PCT = 10    # Seuil de hausse du volume en % au-dessus de la moyenne
+
 COOLDOWN_HOURS   = 4
 CHART_RIGHT_MARGIN = 12
 
@@ -194,7 +197,7 @@ def fetch_h1_data(yf_ticker: str) -> pd.DataFrame | None:
 
 # ─── Détection du momentum ────────────────────────────────────────────────────
 
-def _strength_stars(n: int, total: int = 4) -> str:
+def _strength_stars(n: int, total: int = 5) -> str:
     color = "🔴" if n == 1 else ("🟢" if n >= total else "🟠")
     return f"{color} {'★' * n}{'☆' * (total - n)}"
 
@@ -252,6 +255,17 @@ def detect_momentum(df: pd.DataFrame) -> dict:
     roc_bull = roc >  ROC_THRESHOLD
     roc_bear = roc < -ROC_THRESHOLD
 
+    # ── ⑤ Volume spike ────────────────────────────────────────────────────
+    vol_series   = df["Volume"].replace(0, np.nan).dropna()
+    vol_surge    = False
+    vol_pct      = 0.0
+    if len(vol_series) >= VOLUME_LOOKBACK + 1:
+        avg_vol  = vol_series.iloc[-(VOLUME_LOOKBACK + 1):-1].mean()
+        cur_vol  = vol_series.iloc[-1]
+        if avg_vol > 0:
+            vol_pct   = ((cur_vol - avg_vol) / avg_vol) * 100
+            vol_surge = vol_pct >= VOLUME_SURGE_PCT
+
     # ── Construire les listes de signaux (OR) ─────────────────────────────
     bull_signals, bear_signals = [], []
 
@@ -263,6 +277,10 @@ def detect_momentum(df: pd.DataFrame) -> dict:
     if rsi_mom_bear:     bear_signals.append(f"RSI {rsi:.1f} (zone momentum)")
     if roc_bull:         bull_signals.append(f"ROC +{roc:.2f}%")
     if roc_bear:         bear_signals.append(f"ROC {roc:.2f}%")
+    if vol_surge:
+        label = f"Volume +{vol_pct:.0f}% vs moy {VOLUME_LOOKBACK} bougies"
+        if roc >= 0: bull_signals.append(label)
+        else:        bear_signals.append(label)
 
     if not bull_signals and not bear_signals:
         base["reject_reason"] = "aucune condition déclenchée"
@@ -448,6 +466,7 @@ async def scan_all(bot: Bot) -> None:
     log.info(f"  ② EMA{EMA_FAST} / EMA{EMA_SLOW} alignées + prix du bon côté")
     log.info(f"  ③ RSI en zone momentum ({RSI_MOM_BULL_MIN}–{RSI_MOM_BULL_MAX} bull | {RSI_MOM_BEAR_MIN}–{RSI_MOM_BEAR_MAX} bear)")
     log.info(f"  ④ ROC({ROC_PERIOD}) > {ROC_THRESHOLD}% dans la direction")
+    log.info(f"  ⑤ Volume > moyenne {VOLUME_LOOKBACK} bougies + {VOLUME_SURGE_PCT}%")
     log.info(f"  → 1 seule condition suffit — direction = celle avec le plus de signaux")
     log.info(f"  [COOLDOWN] {COOLDOWN_HOURS}h par paire/direction")
     log.info("=" * 60)
