@@ -60,11 +60,16 @@ async def main() -> None:
 
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     me  = await bot.get_me()
+    now = now_paris()
+    utc_offset = now.strftime("%z")          # ex: +0200
+    utc_label  = f"UTC{utc_offset[:3]}:{utc_offset[3:]}"  # → UTC+02:00
+
     log.info(f"FXMomentumBot connecté : @{me.username}")
     log.info(f"Channel cible : {MOMENTUM_CHANNEL_ID}")
     log.info(f"Paires surveillées : {len(FOREX_PAIRS)}")
+    log.info(f"Heure locale : {now.strftime('%Y-%m-%d %H:%M:%S')} Paris ({utc_label})")
     log.info(f"Interval : {SCAN_INTERVAL_MIN} min — Fenêtres : " +
-             "  ".join(f"{s:02d}h–{e:02d}h" for s, e in WINDOWS) + " (Paris)")
+             "  ".join(f"{s:02d}h–{e:02d}h" for s, e in WINDOWS) + f" ({utc_label})")
     log.info("Ctrl+C pour arrêter\n")
 
     while True:
