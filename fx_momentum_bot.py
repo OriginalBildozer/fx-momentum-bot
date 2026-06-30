@@ -2,7 +2,7 @@
 """
 FXMomentumBot — Alertes momentum Forex/Crypto/Indices
 • Détecte les tendances qui s'accélèrent (≠ overextension qui cherche les retournements)
-• Logique : MACD crossover (obligatoire) + ≥ 1 signal parmi : alignement EMA, RSI momentum, ROC
+• Logique OR : ROC | Volume spike vs bougie précédente | Grosse bougie (×2 range)
 • Cooldown 4h par paire/direction pour éviter les doublons
 """
 
@@ -104,19 +104,13 @@ FOREX_PAIRS: dict[str, dict] = {
 }
 
 # ─── Paramètres de détection ──────────────────────────────────────────────────
-MACD_FAST        = 12
-MACD_SLOW        = 26
-MACD_SIGNAL      = 9
-MACD_CROSS_WINDOW = 3    # crossover détecté si survenu dans les N dernières bougies
-
 EMA_FAST         = 20    # utilisé uniquement pour le graphique
 EMA_SLOW         = 50    # utilisé uniquement pour le graphique
 
 ROC_PERIOD       = 10    # Rate of Change sur N bougies
 ROC_THRESHOLD    = 0.3   # % minimum pour qualifier (0.3 % = 30 pips sur EUR/USD)
 
-VOLUME_LOOKBACK  = 20    # Nombre de bougies pour la moyenne de volume de référence
-VOLUME_SURGE_PCT = 10    # Seuil de hausse du volume en % au-dessus de la moyenne
+VOLUME_SURGE_PCT = 10    # Seuil de hausse du volume en % vs bougie précédente
 
 COOLDOWN_HOURS   = 4
 CHART_RIGHT_MARGIN = 12
@@ -128,25 +122,6 @@ ALERT_STATE_FILE = Path("momentum_state.json")
 
 def compute_ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
-
-
-def compute_macd(series: pd.Series) -> tuple[pd.Series, pd.Series, pd.Series]:
-    fast   = compute_ema(series, MACD_FAST)
-    slow   = compute_ema(series, MACD_SLOW)
-    macd   = fast - slow
-    signal = compute_ema(macd, MACD_SIGNAL)
-    hist   = macd - signal
-    return macd, signal, hist
-
-
-def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta    = series.diff()
-    gain     = delta.clip(lower=0)
-    loss     = -delta.clip(upper=0)
-    avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
-    avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
-    rs       = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
 
 
 def compute_roc(series: pd.Series, period: int) -> pd.Series:
@@ -198,7 +173,7 @@ def fetch_m5_data(td_symbol: str) -> pd.DataFrame | None:
 
 # ─── Détection du momentum ────────────────────────────────────────────────────
 
-def _strength_stars(n: int, total: int = 4) -> str:
+def _strength_stars(n: int, total: int = 3) -> str:
     color = "🔴" if n == 1 else ("🟢" if n >= total else "🟠")
     return f"{color} {'★' * n}{'☆' * (total - n)}"
 
@@ -206,52 +181,38 @@ def _strength_stars(n: int, total: int = 4) -> str:
 def detect_momentum(df: pd.DataFrame) -> dict:
     """
     Logique OR : alerte si au moins 1 condition est vraie dans une direction.
-      ① MACD crossover dans les N dernières bougies
-      ② ROC > seuil dans la bonne direction
-      ③ Volume spike > moyenne + 10%
-      ④ Range bougie actuelle ≥ 2× moy des 2 précédentes
+      ① ROC > seuil dans la bonne direction
+      ② Volume bougie actuelle > bougie précédente + 10%
+      ③ Range bougie actuelle ≥ 2× moy des 2 précédentes
     Direction = celle qui cumule le plus de signaux.
     """
     df = df.copy()
-    df["ROC"]      = compute_roc(df["Close"], ROC_PERIOD)
-    df["MACD"], df["Signal"], df["Hist"] = compute_macd(df["Close"])
+    df["ROC"] = compute_roc(df["Close"], ROC_PERIOD)
 
     base: dict = {
         "detected":      False,
         "reject_reason": "",
         "price":         round(float(df["Close"].iloc[-1]), 5),
         "roc":           round(float(df["ROC"].iloc[-1]), 3) if not pd.isna(df["ROC"].iloc[-1]) else 0,
-        "macd":          round(float(df["MACD"].iloc[-1]), 6) if not pd.isna(df["MACD"].iloc[-1]) else 0,
     }
 
     last = df.iloc[-1]
-    if pd.isna(last["MACD"]):
-        base["reject_reason"] = "indicateurs invalides"
-        return base
+    roc  = float(last["ROC"]) if not pd.isna(last["ROC"]) else 0.0
 
-    roc = float(last["ROC"]) if not pd.isna(last["ROC"]) else 0.0
-
-    # ── ① MACD crossover récent ───────────────────────────────────────────
-    hist_vals = df.iloc[-(MACD_CROSS_WINDOW + 1):]["Hist"].values
-    bull_cross = any(hist_vals[i - 1] < 0 and hist_vals[i] >= 0 for i in range(1, len(hist_vals)))
-    bear_cross = any(hist_vals[i - 1] > 0 and hist_vals[i] <= 0 for i in range(1, len(hist_vals)))
-
-    # ── ② ROC ─────────────────────────────────────────────────────────────
+    # ── ① ROC ─────────────────────────────────────────────────────────────
     roc_bull = roc >  ROC_THRESHOLD
     roc_bear = roc < -ROC_THRESHOLD
 
-    # ── ③ Volume spike ────────────────────────────────────────────────────
-    vol_series   = df["Volume"].replace(0, np.nan).dropna()
-    vol_surge    = False
-    vol_pct      = 0.0
-    if len(vol_series) >= VOLUME_LOOKBACK + 1:
-        avg_vol  = vol_series.iloc[-(VOLUME_LOOKBACK + 1):-1].mean()
-        cur_vol  = vol_series.iloc[-1]
-        if avg_vol > 0:
-            vol_pct   = ((cur_vol - avg_vol) / avg_vol) * 100
-            vol_surge = vol_pct >= VOLUME_SURGE_PCT
+    # ── ② Volume spike (vs bougie précédente) ─────────────────────────────
+    vol_surge = False
+    vol_pct   = 0.0
+    prev_vol  = float(df["Volume"].iloc[-2]) if len(df) >= 2 else 0.0
+    cur_vol   = float(df["Volume"].iloc[-1])
+    if prev_vol > 0:
+        vol_pct   = ((cur_vol - prev_vol) / prev_vol) * 100
+        vol_surge = vol_pct >= VOLUME_SURGE_PCT
 
-    # ── ④ Grosse bougie (range actuel ≥ 2× moy des 2 précédentes) ────────
+    # ── ③ Grosse bougie (range actuel ≥ 2× moy des 2 précédentes) ────────
     cur_range  = float(last["High"] - last["Low"])
     avg_range2 = (
         float(df.iloc[-2]["High"] - df.iloc[-2]["Low"]) +
@@ -263,12 +224,10 @@ def detect_momentum(df: pd.DataFrame) -> dict:
     # ── Construire les listes de signaux (OR) ─────────────────────────────
     bull_signals, bear_signals = [], []
 
-    if bull_cross: bull_signals.append("MACD crossover haussier")
-    if bear_cross: bear_signals.append("MACD crossover baissier")
     if roc_bull:   bull_signals.append(f"ROC +{roc:.2f}%")
     if roc_bear:   bear_signals.append(f"ROC {roc:.2f}%")
     if vol_surge:
-        label = f"Volume +{vol_pct:.0f}% vs moy {VOLUME_LOOKBACK} bougies"
+        label = f"Volume +{vol_pct:.0f}% vs bougie précédente"
         if roc >= 0: bull_signals.append(label)
         else:        bear_signals.append(label)
     if big_candle:
@@ -298,7 +257,7 @@ def detect_momentum(df: pd.DataFrame) -> dict:
 
 # ─── Génération du graphique ──────────────────────────────────────────────────
 
-def generate_chart(df: pd.DataFrame, pair: str, direction: str, macd_col: pd.Series, signal_col: pd.Series) -> bytes:
+def generate_chart(df: pd.DataFrame, pair: str, direction: str) -> bytes:
     from datetime import timezone
 
     now      = datetime.now(timezone.utc)
@@ -309,20 +268,16 @@ def generate_chart(df: pd.DataFrame, pair: str, direction: str, macd_col: pd.Ser
     ema20_full = compute_ema(df["Close"], EMA_FAST)
     ema50_full = compute_ema(df["Close"], EMA_SLOW)
 
-    chart_df   = df[df.index >= start_dt].copy()
+    chart_df = df[df.index >= start_dt].copy()
     if chart_df.empty:
         chart_df = df.tail(72).copy()
 
-    ema20  = ema20_full[chart_df.index]
-    ema50  = ema50_full[chart_df.index]
-    macd_c = macd_col[chart_df.index]
-    sig_c  = signal_col[chart_df.index]
+    ema20 = ema20_full[chart_df.index]
+    ema50 = ema50_full[chart_df.index]
 
     add_plots = [
-        mpf.make_addplot(ema20,   color="#FFFFFF",  width=1.2, label=f"EMA {EMA_FAST}"),
-        mpf.make_addplot(ema50,   color="#F0A500",  width=1.2, label=f"EMA {EMA_SLOW}"),
-        mpf.make_addplot(macd_c,  color="#2196F3",  width=1.0, panel=1, label="MACD"),
-        mpf.make_addplot(sig_c,   color="#FF6B6B",  width=1.0, panel=1, label="Signal"),
+        mpf.make_addplot(ema20, color="#FFFFFF", width=1.2, label=f"EMA {EMA_FAST}"),
+        mpf.make_addplot(ema50, color="#F0A500", width=1.2, label=f"EMA {EMA_SLOW}"),
     ]
 
     mc = mpf.make_marketcolors(up="#26a69a", down="#ef5350", edge="inherit", wick="inherit")
@@ -355,12 +310,11 @@ def generate_chart(df: pd.DataFrame, pair: str, direction: str, macd_col: pd.Ser
         style=style,
         addplot=add_plots,
         title=f"\n{pair}  ·  M5  ·  Momentum {label_dir}",
-        figsize=(14, 8),
+        figsize=(14, 7),
         returnfig=True,
         tight_layout=True,
         warn_too_much_data=300,
         volume=False,
-        panel_ratios=(3, 1),
     )
 
     ax = axes[0]
@@ -446,7 +400,7 @@ async def send_alert(bot: Bot, pair: str, result: dict, tv_symbol: str, chart_by
         parse_mode="Markdown",
         reply_markup=keyboard,
     )
-    log.info(f"✅ Alerte momentum envoyée : {pair} {direction} | RSI={result['rsi']} | ROC={result['roc']}%")
+    log.info(f"✅ Alerte momentum envoyée : {pair} {direction} | ROC={result['roc']}%")
 
 
 # ─── Scan ─────────────────────────────────────────────────────────────────────
@@ -457,10 +411,9 @@ async def scan_all(bot: Bot) -> None:
     log.info(f"Paires surveillées : {len(FOREX_PAIRS)}")
     log.info("─" * 60)
     log.info("CONDITIONS DE DÉCLENCHEMENT (logique OR) :")
-    log.info(f"  ① MACD crossover dans les {MACD_CROSS_WINDOW} dernières bougies")
-    log.info(f"  ② ROC({ROC_PERIOD}) > {ROC_THRESHOLD}% dans la direction")
-    log.info(f"  ③ Volume > moyenne {VOLUME_LOOKBACK} bougies + {VOLUME_SURGE_PCT}%")
-    log.info(f"  ④ Range bougie actuelle ≥ 2× moy des 2 bougies précédentes")
+    log.info(f"  ① ROC({ROC_PERIOD}) > {ROC_THRESHOLD}% dans la direction")
+    log.info(f"  ② Volume > bougie précédente + {VOLUME_SURGE_PCT}%")
+    log.info(f"  ③ Range bougie actuelle ≥ 2× moy des 2 bougies précédentes")
     log.info(f"  → 1 seule condition suffit — direction = celle avec le plus de signaux")
     log.info(f"  [COOLDOWN] {COOLDOWN_HOURS}h par paire/direction")
     log.info("=" * 60)
@@ -478,15 +431,9 @@ async def scan_all(bot: Bot) -> None:
 
             result = detect_momentum(df)
 
-            # Recalculer MACD pour le graphique (sur le df complet)
-            macd_s, signal_s, _ = compute_macd(df["Close"])
-
-            ok  = "✅"
-            nok = "❌"
             log.info(
                 f"  {pair:<12} | "
-                f"Prix={result['price']}  RSI={result['rsi']}  ROC={result['roc']:+.3f}%  "
-                f"MACD={result['macd']:+.6f}"
+                f"Prix={result['price']}  ROC={result['roc']:+.3f}%"
                 + (f"  → {result['reject_reason']}" if not result["detected"] else "")
             )
 
@@ -498,7 +445,7 @@ async def scan_all(bot: Bot) -> None:
                     f"— signaux : {', '.join(result['signals'])}"
                 )
                 if not is_on_cooldown(state, pair, direction, result["signals"]):
-                    chart_bytes = generate_chart(df, pair, direction, macd_s, signal_s)
+                    chart_bytes = generate_chart(df, pair, direction)
                     await send_alert(bot, pair, result, info["tv"], chart_bytes)
                     mark_alerted(state, pair, direction, result["signals"])
                     save_alert_state(state)
