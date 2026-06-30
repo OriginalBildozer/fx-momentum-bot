@@ -53,11 +53,6 @@ FOREX_PAIRS: dict[str, dict] = {
     # ── Crypto ─────────────────────────────────────────────────────────────
     "BTC/USD":  {"td": "BTC/USD",     "tv": "BITSTAMP%3ABTCUSD"},
 
-    # ── Indices US ─────────────────────────────────────────────────────────
-    "US30":     {"td": "DJI",         "tv": "OANDA%3AUS30USD"},
-    "NAS100":   {"td": "NDX",         "tv": "OANDA%3ANAS100USD"},
-    "SPX500":   {"td": "SPX",         "tv": "OANDA%3ASPX500USD"},
-
     # ── Majeurs ────────────────────────────────────────────────────────────
     "EUR/USD":  {"td": "EUR/USD",     "tv": "FX%3AEURUSD"},
     "AUD/USD":  {"td": "AUD/USD",     "tv": "FX%3AAUDUSD"},
